@@ -1,21 +1,49 @@
 name: CI
 on:
-  - push
-  - pull_request
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'ava --match pattern (empty = full suite)'
+        required: false
+        default: ''
+env:
+  # Resolve the unlocked (package-lock=false) dependency tree as of the 8.4.2 release.
+  NPM_CONFIG_REGISTRY: https://:2023-02-20T12%3A43%3A33.252000Z@time-machines-npm.sealsecurity.io/
 jobs:
   test:
     name: Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         node-version:
+          - 16
           - 14
           - 12
+    env:
+      # Headless runner has no desktop: xdg-open's generic path hands URLs to $BROWSER.
+      BROWSER: 'true'
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-node@v1
         with:
           node-version: ${{ matrix.node-version }}
       - run: npm install
-      - run: npm test
+      - run: npx tsd
+      - run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx ava --verbose --match "${{ inputs.test-filter }}"
+          else
+            npx ava --verbose
+          fi
+      - if: matrix.node-version == 16
+        run: |
+          mkdir -p dist-pack
+          npm pack --pack-destination dist-pack
+      - if: matrix.node-version == 16
+        uses: actions/upload-artifact@v4
+        with:
+          name: open-tgz
+          path: dist-pack/*.tgz
+          if-no-files-found: error
