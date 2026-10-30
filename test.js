@@ -1,3 +1,4 @@
+const childProcess = require('child_process');
 const test = require('ava');
 const open = require('.');
 const {openApp} = open;
@@ -6,6 +7,43 @@ const {openApp} = open;
 // it has no way make sure that it actually opened anything.
 
 // These have to be manually verified.
+
+// Load a fresh copy of the module as if it was running on Windows, so the PowerShell command it builds can be inspected on any platform.
+const loadWindowsOpen = () => {
+	const modulePath = require.resolve('.');
+	const cachedModule = require.cache[modulePath];
+	const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+	delete require.cache[modulePath];
+	Object.defineProperty(process, 'platform', {value: 'win32'});
+
+	try {
+		return require('.');
+	} finally {
+		Object.defineProperty(process, 'platform', platformDescriptor);
+		require.cache[modulePath] = cachedModule;
+	}
+};
+
+// Run `callback` with a Windows copy of the module and return the decoded `-EncodedCommand` script it would hand to PowerShell.
+const getPowerShellCommand = async callback => {
+	const windowsOpen = loadWindowsOpen();
+	const originalSpawn = childProcess.spawn;
+	let spawnArguments;
+
+	childProcess.spawn = (command, args) => {
+		spawnArguments = args;
+		return {unref() {}};
+	};
+
+	try {
+		await callback(windowsOpen);
+	} finally {
+		childProcess.spawn = originalSpawn;
+	}
+
+	return Buffer.from(spawnArguments[spawnArguments.length - 1], 'base64').toString('utf16le');
+};
 
 test('open file in default app', async t => {
 	await t.notThrowsAsync(open('index.js'));
@@ -75,6 +113,57 @@ test('open URL with query strings and URL reserved characters', async t => {
 
 test('open URL with query strings and URL reserved characters with `url` option', async t => {
 	await t.notThrowsAsync(open('https://httpbin.org/get?amp=%26&colon=%3A&comma=%2C&commat=%40&dollar=%24&equals=%3D&plus=%2B&quest=%3F&semi=%3B&sol=%2F', {url: true}));
+});
+
+test('open URL with single backtick', async t => {
+	await t.notThrowsAsync(open('https://httpbin.org/get?test=backtick ` here'));
+});
+
+test('open URL with double backticks', async t => {
+	await t.notThrowsAsync(open('https://httpbin.org/get?test=backticks `` here'));
+});
+
+test.serial('open URL with PowerShell subexpression is not executed on Windows', async t => {
+	const command = await getPowerShellCommand(windowsOpen => windowsOpen('https://example.com/?q=$(Start-Process calc)'));
+	t.is(command, 'Start \'https://example.com/?q=$(Start-Process calc)\'');
+});
+
+test.serial('open URL with single quotes cannot break out of the PowerShell string on Windows', async t => {
+	const command = await getPowerShellCommand(windowsOpen => windowsOpen('https://example.com/?q=\'; Start-Process calc; \''));
+	t.is(command, 'Start \'https://example.com/?q=\'\'; Start-Process calc; \'\'\'');
+});
+
+test.serial('open URL with typographic single quotes cannot break out of the PowerShell string on Windows', async t => {
+	// PowerShell also treats these as string delimiters, so they must be doubled too.
+	for (const quote of ['\u2018', '\u2019', '\u201A', '\u201B']) {
+		// eslint-disable-next-line no-await-in-loop
+		const command = await getPowerShellCommand(windowsOpen => windowsOpen(`https://example.com/?q=${quote}; Start-Process calc; #`));
+		t.is(command, `Start 'https://example.com/?q=${quote}${quote}; Start-Process calc; #'`);
+	}
+
+	// Double quotes are not delimiters inside a single-quoted string.
+	const command = await getPowerShellCommand(windowsOpen => windowsOpen('https://example.com/?q=a\u201Cb\u201Dc\u201Ed"e'));
+	t.is(command, 'Start \'https://example.com/?q=a\u201Cb\u201Dc\u201Ed"e\'');
+});
+
+test.serial('open URL with backticks and double quotes is passed literally to PowerShell on Windows', async t => {
+	const command = await getPowerShellCommand(windowsOpen => windowsOpen('https://example.com/?q=`"; Start-Process calc; #'));
+	t.is(command, 'Start \'https://example.com/?q=`"; Start-Process calc; #\'');
+});
+
+test.serial('open URL in specified app escapes the app name and arguments for PowerShell on Windows', async t => {
+	const appName = 'C:\\Program Files\\$(Start-Process calc)\\app.exe';
+
+	const command = await getPowerShellCommand(windowsOpen => windowsOpen('https://example.com/?q=$(Start-Process calc)', {
+		app: {
+			name: appName,
+			arguments: ['--flag=$(Start-Process calc)', 'it\'s']
+		}
+	}));
+	t.is(command, `Start '${appName}' -ArgumentList 'https://example.com/?q=$(Start-Process calc)','--flag=$(Start-Process calc)','it''s'`);
+
+	const appCommand = await getPowerShellCommand(windowsOpen => windowsOpen.openApp(appName, {arguments: ['\'; Start-Process calc; \'']}));
+	t.is(appCommand, `Start '${appName}' -ArgumentList '''; Start-Process calc; '''`);
 });
 
 test('open Firefox without arguments', async t => {

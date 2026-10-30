@@ -10,6 +10,13 @@ const localXdgOpenPath = path.join(__dirname, 'xdg-open');
 
 const {platform, arch} = process;
 
+/**
+Escape value for PowerShell. Single-quoted strings are literal (no variable expansion or escape sequences), unlike double-quoted strings. Escapes single quotes by doubling (handles already-doubled quotes correctly).
+
+PowerShell's tokenizer treats the typographic single quotes U+2018, U+2019, U+201A, and U+201B as string delimiters, exactly like the ASCII one, and it does not require the closing quote to match the opening quote. Escaping only the ASCII quote would let any of the others terminate the string and inject a statement. Doubling works for all of them.
+*/
+const escapeForPowerShell = value => `'${String(value).replace(/['‘’‚‛]/g, match => match + match)}'`;
+
 // Podman detection
 const hasContainerEnv = () => {
 	try {
@@ -165,18 +172,16 @@ const baseOpen = async options => {
 		}
 
 		if (app) {
-			// Double quote with double quotes to ensure the inner quotes are passed through.
-			// Inner quotes are delimited for PowerShell interpretation with backticks.
-			encodedArguments.push(`"\`"${app}\`""`, '-ArgumentList');
+			encodedArguments.push(escapeForPowerShell(app), '-ArgumentList');
 			if (options.target) {
 				appArguments.unshift(options.target);
 			}
 		} else if (options.target) {
-			encodedArguments.push(`"${options.target}"`);
+			encodedArguments.push(escapeForPowerShell(options.target));
 		}
 
 		if (appArguments.length > 0) {
-			appArguments = appArguments.map(arg => `"\`"${arg}\`""`);
+			appArguments = appArguments.map(arg => escapeForPowerShell(arg));
 			encodedArguments.push(appArguments.join(','));
 		}
 
